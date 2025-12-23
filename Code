@@ -1,0 +1,135 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import RFE
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+import matplotlib.pyplot as plt
+
+url = "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data"
+column_names = [
+    "checking_status", "duration", "credit_history", "purpose", "credit_amount",
+    "savings", "employment", "installment_rate", "personal_status", "other_debtors",
+    "residence_since", "property", "age", "other_installment_plans", "housing",
+    "existing_credits", "job", "num_dependents", "telephone", "foreign_worker", "class"
+]
+df = pd.read_csv(url, sep=' ', header=None, names=column_names)
+
+X = df.drop('class', axis=1)
+y = df['class'].map({1: 0, 2: 1}) # 1(Good)->0, 2(Bad)->1
+
+mapping = {
+    "checking_status": {"A11": "< 0 DM", "A12": "0 <= ... < 200 DM", "A13": ">= 200 DM", "A14": "no checking account"},
+    "credit_history": {"A30": "no credits/all paid", "A31": "all paid duly here", "A32": "existing paid duly", "A33": "delay in past", "A34": "critical account"},
+    "purpose": {"A40": "car (new)", "A41": "car (used)", "A42": "furniture/equipment", "A43": "radio/television", "A44": "domestic appliances", "A45": "repairs", "A46": "education", "A47": "vacation", "A48": "retraining", "A49": "business", "A410": "others"},
+    "savings": {"A61": "< 100 DM", "A62": "100-500 DM", "A63": "500-1000 DM", "A64": ">= 1000 DM", "A65": "unknown/none"},
+    "employment": {"A71": "unemployed", "A72": "< 1 year", "A73": "1-4 years", "A74": "4-7 years", "A75": ">= 7 years"},
+    "personal_status": {"A91": "male:divorced", "A92": "female:div/mar", "A93": "male:single", "A94": "male:married", "A95": "female:single"},
+    "other_debtors": {"A101": "none", "A102": "co-applicant", "A103": "guarantor"},
+    "property": {"A121": "real estate", "A122": "life insurance", "A123": "car/other", "A124": "unknown/none"},
+    "other_installment_plans": {"A141": "bank", "A142": "stores", "A143": "none"},
+    "housing": {"A151": "rent", "A152": "own", "A153": "for free"},
+    "job": {"A171": "unemployed/unskilled", "A172": "unskilled/resident", "A173": "skilled/official", "A174": "management/highly qualified"},
+    "telephone": {"A191": "none", "A192": "yes"},
+    "foreign_worker": {"A201": "yes", "A202": "no"}
+}
+for col, map_val in mapping.items():
+    X[col] = X[col].map(map_val)
+
+num_cols = ["duration", "credit_amount", "installment_rate", "residence_since", "age", "existing_credits", "num_dependents"]
+scaler = StandardScaler()
+X[num_cols] = scaler.fit_transform(X[num_cols])
+
+X_final = pd.get_dummies(X, drop_first=True)
+
+X_train, X_test, y_train, y_test = train_test_split(X_final, y_final, test_size=0.2, random_state=42, stratify=y_final)
+
+log_reg = LogisticRegression(solver='liblinear', class_weight={0: 1, 1: 5}, max_iter=1000, random_state=42)
+rfe = RFE(estimator=log_reg, n_features_to_select=15)
+rfe.fit(X_train, y_train)
+
+selected_features = X_final.columns[rfe.support_]
+print(f"Seçilen En İyi 15 Özellik:\n{list(selected_features)}")
+
+model_optimized = LogisticRegression(solver='liblinear', class_weight={0: 1, 1: 5}, max_iter=1000, random_state=42)
+model_optimized.fit(X_train[selected_features], y_train)
+
+y_pred_proba = model_optimized.predict_proba(X_test[selected_features])[:, 1]
+
+min_cost = float('inf')
+best_threshold = 0.5
+
+for thresh in np.arange(0.1, 0.9, 0.05):
+    y_temp_pred = (y_pred_proba >= thresh).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_temp_pred).ravel()
+    cost = (fp * 1) + (fn * 5) 
+    if cost < min_cost:
+        min_cost = cost
+        best_threshold = thresh
+
+print(f"\nOptimal Eşik Değeri: {best_threshold:.2f}")
+print(f"Minimize Edilmiş Maliyet: {min_cost}")
+
+y_final_pred = (y_pred_proba >= best_threshold).astype(int)
+
+print("\n### OPTİMİZE EDİLMİŞ MODEL SONUÇLARI ###")
+print("\n--- Confusion Matrix ---")
+print(confusion_matrix(y_test, y_final_pred))
+print("\n--- Classification Report ---")
+print(classification_report(y_test, y_final_pred, target_names=['İyi (0)', 'Kötü (1)']))
+
+importances = pd.Series(model_optimized.coef_[0], index=selected_features).sort_values(ascending=False)
+plt.figure(figsize=(10, 6))
+importances.plot(kind='bar', color=['red' if x > 0 else 'green' for x in importances])
+plt.title('En Etkili 15 Özellik (Yeşil: Güvenli, Kırmızı: Riskli)')
+plt.ylabel('Etki Gücü (Katsayı)')
+plt.tight_layout()
+plt.savefig('optimized_results.png')
+from scipy.stats import ks_2samp
+
+roc_auc = roc_auc_score(y_test, y_pred_proba)
+gini = (2 * roc_auc) - 1
+
+print(f"\n--- BANKA STANDARDI METRİKLER ---")
+print(f"ROC AUC Score: {roc_auc:.4f}")
+print(f"Gini Katsayısı: {gini:.4f} (Banka Hedefi: >0.40)")
+
+y_test_df = pd.DataFrame({'truth': y_test, 'prob': y_pred_proba})
+good_probs = y_test_df[y_test_df['truth'] == 0]['prob']
+bad_probs = y_test_df[y_test_df['truth'] == 1]['prob']
+
+ks_statistic, p_value = ks_2samp(bad_probs, good_probs)
+print(f"KS İstatistiği: {ks_statistic:.4f} (Banka Hedefi: >0.30)")
+
+if gini > 0.40 and ks_statistic > 0.30:
+    print("SONUÇ: Model istatistiksel olarak banka standartlarına yakın ayrıştırma gücüne sahip.")
+else:
+    print("SONUÇ: Modelin ayrıştırma gücü henüz banka standartlarında değil.")
+    from sklearn.model_selection import cross_val_score
+
+y_train_pred_proba = model_optimized.predict_proba(X_train[selected_features])[:, 1]
+y_test_pred_proba = model_optimized.predict_proba(X_test[selected_features])[:, 1]
+
+train_auc = roc_auc_score(y_train, y_train_pred_proba)
+test_auc = roc_auc_score(y_test, y_test_pred_proba)
+
+print("### OVERFITTING KONTROL RAPORU ###")
+print(f"Eğitim Seti (Train) AUC Skoru: {train_auc:.4f}")
+print(f"Test Seti (Test) AUC Skoru:    {test_auc:.4f}")
+
+fark = train_auc - test_auc
+print(f"Fark (Makas): {fark:.4f}")
+
+if fark > 0.10:
+    print("DURUM: Kritik Overfitting! Model veriyi ezberlemiş (Train çok yüksek, Test düşük).")
+elif fark > 0.05:
+    print("DURUM: Hafif Overfitting riski var. Düzenlileştirme (Regularization) gerekebilir.")
+else:
+    print("DURUM: Başarılı. Model genelleme yapabiliyor (Train ve Test dengeli).")
+
+cv_scores = cross_val_score(model_optimized, X_final[selected_features], y_final, cv=5, scoring='roc_auc')
+
+print(f"\n--- 5-Katlı Çapraz Doğrulama (Cross Validation) ---")
+print(f"Skorlar: {cv_scores}")
+print(f"Ortalama Skor: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
